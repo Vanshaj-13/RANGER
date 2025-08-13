@@ -1,0 +1,14 @@
+opencv-python>=4.8.0
+
+ultralytics>=8.0.196
+
+torch>=2.1.0; python_version<"3.12"
+
+torchvision>=0.16.0; python_version<"3.12"
+
+firebase-admin>=6.8.0
+
+easyocr>=1.7.1
+
+numpy>=1.23.0
+
