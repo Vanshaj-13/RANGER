@@ -12,10 +12,21 @@ import torch
 import firebase_admin
 from firebase_admin import credentials, db
 
+# ----- NEW: MQTT -----
+import paho.mqtt.client as mqtt
+# MQTT configuration
+MQTT_BROKER = "192.168.0.10"  # <-- change to your broker IP/hostname
+MQTT_PORT = 1883
+MQTT_USER = None              # e.g., "username" or None
+MQTT_PASS = None              # e.g., "password" or None
+MQTT_TOPIC = "ranger/control/servo"
+MQTT_QOS = 1
+SERVO_TRIGGER_COOLDOWN_SEC = 2.0  # avoid spamming
+
 # ---------- Config ----------
 FIREBASE_CREDENTIALS_PATH = r"ranger_database.json"
 FIREBASE_DB_URL = "https://ranger-e0a95-default-rtdb.firebaseio.com/"
-rtsp_url = "rtsp://<pi-ip>:8554/piCam"  # <-- set your RTSP stream here
+rtsp_url = "http://192.168.0.242:8080/stream.mjpg"  # <-- set your RTSP stream here
 yolo_weights = "best.pt"                # your license-plate detector weights
 
 # Workaround for some OpenMP/KMP conflicts on Windows/conda
@@ -190,6 +201,43 @@ print(f"[INFO] YOLO predict will use device={PREDICT_KW['device']}")
 # Your custom class list (model-dependent)
 className = ["License"]
 
+# =========================
+# MQTT client setup
+# =========================
+mqtt_client = mqtt.Client()
+if MQTT_USER is not None:
+    mqtt_client.username_pw_set(MQTT_USER, MQTT_PASS if MQTT_PASS is not None else "")
+
+def on_connect(client, userdata, flags, rc, properties=None):
+    print(f"[MQTT] {'connected' if rc == 0 else f'connect failed rc={rc}'}")
+
+def on_disconnect(client, userdata, rc, properties=None):
+    print(f"[MQTT] disconnected rc={rc}")
+
+mqtt_client.on_connect = on_connect
+mqtt_client.on_disconnect = on_disconnect
+
+try:
+    mqtt_client.connect(MQTT_BROKER, MQTT_PORT, keepalive=30)
+except Exception as e:
+    print(f"[MQTT] Initial connect failed: {e}")
+mqtt_client.loop_start()
+
+_last_servo_publish_ts = 0.0
+
+def publish_servo(angle=90):
+    global _last_servo_publish_ts
+    now_ts = datetime.now().timestamp()
+    if now_ts - _last_servo_publish_ts < SERVO_TRIGGER_COOLDOWN_SEC:
+        return
+    payload = str(int(angle))  # e.g., "90"
+    try:
+        mqtt_client.publish(MQTT_TOPIC, payload=payload, qos=MQTT_QOS, retain=False)
+        _last_servo_publish_ts = now_ts
+        print(f"[MQTT] Published {payload} to {MQTT_TOPIC}")
+    except Exception as e:
+        print(f"[MQTT] Publish failed: {e}")
+
 # ---------- Stream loop (RTSP via Ultralytics) ----------
 startTime = datetime.now()
 license_plates = set()
@@ -226,9 +274,12 @@ try:
                 # OCR on ROI
                 label = easyocr_ocr(frame, x1, y1, x2, y2)
 
-                # Push unique plate once
+                # If a number plate text is detected, trigger servo and push to Firebase once
                 currentTime = datetime.now()
                 if label:
+                    # Send MQTT command to rotate servo 90 degrees
+                    publish_servo(angle=90)
+
                     license_plates.add(label)
                     push_plate_to_firebase_once(label, currentTime.isoformat())
 
@@ -255,3 +306,8 @@ except KeyboardInterrupt:
     pass
 finally:
     cv2.destroyAllWindows()
+    try:
+        mqtt_client.loop_stop()
+        mqtt_client.disconnect()
+    except Exception:
+        pass
